@@ -28,6 +28,9 @@ renders each installed descriptor, which is substantially safer across iOS 16 po
 
 ## Build
 
+The 0.1.1 repair notes and device verification procedure are in
+[docs/repair-0.1.1.zh-CN.md](docs/repair-0.1.1.zh-CN.md).
+
 Install current Theos and use an iOS 16 or newer SDK:
 
 ```sh
@@ -44,6 +47,26 @@ make package install THEOS_DEVICE_IP=iphone.local
 The project forces `THEOS_PACKAGE_SCHEME=rootless`. The resulting package expects the
 rootless prefix `/var/jb`.
 
+On Windows, use **Actions → Build rootless deb → Run workflow** on a branch containing
+these changes. The macOS job runs the Objective-C regression harness, builds both
+architectures with an iOS 16.0 deployment target, checks the extracted package and signed
+daemon entitlements, then uploads **PosterForge-0.1.1-rootless** (the `.deb`, SHA256SUMS,
+and toolchain revisions). A separate diagnostics artifact includes the build log and
+per-slice entitlement dumps. Public APT publishing requires explicitly checking
+`publish_apt_repository`; ordinary builds and PRs only produce artifacts.
+
+To run the host regression tests on macOS without Theos:
+
+```sh
+sh Tests/run-host-tests.sh
+```
+
+`posterforged --diagnose-container` performs a read-only metadata lookup and prints JSON.
+Run it with the same root identity as launchd when diagnosing access failures. The daemon
+logs enumeration, metadata parsing, UID/GID, mode bits, and access checks. Failed Completed
+records also contain structured `errorDetails`, including the underlying error and lookup
+diagnostics; an empty Requests directory means processing finished, not that it succeeded.
+
 ## Operational notes
 
 - PosterBoard's descriptor store on iOS 16 is structure version `59`.
@@ -59,6 +82,17 @@ rootless prefix `/var/jb`.
 - `.tendies` container-format restores are intentionally rejected. Descriptor-format packages
   are supported; blindly restoring an entire PosterBoard container is too risky for an
   on-device root daemon.
+- Only exact, case-insensitive `descriptor` and `descriptors` group names are accepted.
+  Mixed Container/Descriptor packages, symbolic links, special files, unsafe/duplicate ZIP
+  paths, unsupported ZIP compression/encryption/ZIP64, and invalid descriptor metadata are
+  rejected. Archives are limited to 256 MiB compressed, 1 GiB expanded, 256 MiB per file,
+  and 20,000 entries. Stored and deflated ZIP entries with UTF-8/ASCII paths are supported.
+- Descriptor UUIDs and top-level wallpaper IDs are randomized. Nested asset identifiers
+  remain intact because the package may reference them internally.
+- New descriptors are staged outside PosterBoard and published with an exclusive rename.
+  Existing destination directories are never replaced. Removal requires an ownership marker
+  created by 0.1.1; unmarked entries from 0.1.0 are left intact. PosterBoard refresh only
+  restarts the process, without modifying its preference files or resetting file protection.
 - Animated packages created for newer iOS releases can reference classes or assets absent on
   iOS 16. PosterForge can import the package but cannot make missing Apple frameworks exist.
 

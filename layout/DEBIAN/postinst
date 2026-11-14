@@ -1,12 +1,21 @@
 #!/bin/sh
 set -e
-mkdir -p "/var/mobile/Library/Application Support/PosterForge/Library"
-mkdir -p "/var/mobile/Library/Application Support/PosterForge/Requests"
-mkdir -p "/var/mobile/Library/Application Support/PosterForge/Completed"
-chown -R mobile:mobile /var/mobile/Library/Application\ Support/PosterForge
-chmod -R 0775 /var/mobile/Library/Application\ Support/PosterForge
+root="/var/mobile/Library/Application Support/PosterForge"
+for dir in "$root" "$root/Library" "$root/Requests" "$root/Completed"; do
+    mkdir -p "$dir"
+    chown mobile:mobile "$dir"
+    chmod 0775 "$dir"
+done
+mkdir -p /var/mobile/Library/Logs
+touch /var/mobile/Library/Logs/PosterForge.log
+chown mobile:mobile /var/mobile/Library/Logs/PosterForge.log
+chmod 0644 /var/mobile/Library/Logs/PosterForge.log
 launchctl bootout system/com.posterforge.daemon 2>/dev/null || true
-launchctl bootstrap system /var/jb/Library/LaunchDaemons/com.posterforge.daemon.plist 2>/dev/null || true
-launchctl kickstart -k system/com.posterforge.daemon 2>/dev/null || true
+if ! launchctl bootstrap system /var/jb/Library/LaunchDaemons/com.posterforge.daemon.plist; then
+    echo "PosterForge: launchd bootstrap failed; inspect launchctl print system/com.posterforge.daemon" >&2
+fi
+if ! launchctl kickstart -k system/com.posterforge.daemon; then
+    echo "PosterForge: daemon did not start; inspect /var/mobile/Library/Logs/PosterForge.log" >&2
+fi
 killall -9 Preferences PosterBoard 2>/dev/null || true
 exit 0

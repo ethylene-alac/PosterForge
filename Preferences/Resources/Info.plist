@@ -7,8 +7,8 @@
   <key>CFBundleIdentifier</key><string>com.posterforge.preferences</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundlePackageType</key><string>BNDL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>0.1.1</string>
+  <key>CFBundleVersion</key><string>2</string>
   <key>NSPhotoLibraryUsageDescription</key><string>PosterForge imports photos and videos as wallpapers.</string>
   <key>NSPrincipalClass</key><string>PFRootListController</string>
 </dict></plist>

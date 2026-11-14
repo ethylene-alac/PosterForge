@@ -37,20 +37,22 @@
     UIDocumentPickerViewController *picker=[[UIDocumentPickerViewController alloc]initForOpeningContentTypes:@[UTTypeArchive,UTTypeData] asCopy:YES]; picker.delegate=self; picker.allowsMultipleSelection=NO; [self presentViewController:picker animated:YES completion:nil];
 }
 - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
-    [picker dismissViewControllerAnimated:YES completion:nil]; PHPickerResult *result=results.firstObject; if(!result)return; NSItemProvider *p=result.itemProvider;
+    // Start loading only after dismissal; a cached photo may load immediately.
+    [picker dismissViewControllerAnimated:YES completion:^{
+    PHPickerResult *result=results.firstObject; if(!result)return; NSItemProvider *p=result.itemProvider;
     if([p canLoadObjectOfClass:UIImage.class]) [p loadObjectOfClass:UIImage.class completionHandler:^(UIImage *image,NSError *e){dispatch_async(dispatch_get_main_queue(),^{if(image)[self editImage:image];});}];
     else {
         NSString *type=[p hasItemConformingToTypeIdentifier:@"public.movie"]?@"public.movie":@"public.video";
-        [p loadFileRepresentationForTypeIdentifier:type completionHandler:^(NSURL *url,NSError *e){if(!url)return; NSString *tmp=[NSTemporaryDirectory() stringByAppendingPathComponent:[PFNewIdentifier() stringByAppendingPathExtension:url.pathExtension ?: @"mov"]]; [[NSFileManager defaultManager] copyItemAtURL:url toURL:[NSURL fileURLWithPath:tmp] error:nil]; dispatch_async(dispatch_get_main_queue(),^{[self saveVideoAt:tmp];});}];
+        [p loadFileRepresentationForTypeIdentifier:type completionHandler:^(NSURL *url,NSError *e){if(!url)return; NSString *tmp=[NSTemporaryDirectory() stringByAppendingPathComponent:[PFNewIdentifier() stringByAppendingPathExtension:url.pathExtension ?: @"mov"]]; [[NSFileManager defaultManager] copyItemAtURL:url toURL:[NSURL fileURLWithPath:tmp] error:NULL]; dispatch_async(dispatch_get_main_queue(),^{[self saveVideoAt:tmp];});}];
     }
+    }];
 }
 - (void)editImage:(UIImage *)image {
     __weak typeof(self) weak=self; PFCropViewController *crop=[[PFCropViewController alloc]initWithImage:image completion:^(UIImage *output,BOOL blur){[weak saveImage:output blur:blur];}];
     UINavigationController *nav=[[UINavigationController alloc]initWithRootViewController:crop]; nav.modalPresentationStyle=UIModalPresentationFullScreen; [self presentViewController:nav animated:YES completion:nil];
 }
-- (NSString *)askTitleDefault:(NSString *)fallback { return fallback; }
 - (void)saveImage:(UIImage *)image blur:(BOOL)blur {
-    NSString *uuid=PFNewIdentifier(); NSString *dir=[PFLibraryDirectory stringByAppendingPathComponent:uuid]; [[NSFileManager defaultManager]createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *uuid=PFNewIdentifier(); NSString *dir=[PFLibraryDirectory stringByAppendingPathComponent:uuid]; [[NSFileManager defaultManager]createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
     NSString *source=[dir stringByAppendingPathComponent:@"source.jpg"]; [UIImageJPEGRepresentation(image,0.94) writeToFile:source atomically:YES]; [self saveThumbnail:image directory:dir];
     NSDictionary *item=@{@"identifier":uuid,@"title":[NSString stringWithFormat:@"Photo %@",[uuid substringToIndex:4]],@"kind":@"image",@"sourcePath":source,@"thumbnailPath":[dir stringByAppendingPathComponent:@"thumbnail.jpg"],@"homeBlur":@(blur),@"created":NSDate.date,@"fps":@1}; [self finishItem:item];
 }
@@ -58,22 +60,25 @@
     AVURLAsset *asset=[AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:temporary] options:nil]; double seconds=CMTimeGetSeconds(asset.duration);
     if(!isfinite(seconds)||seconds<=0){[self alert:@"The selected video cannot be read."];return;}
     if(seconds>27){[self alert:@"Videos are limited to roughly 27 seconds / 400 frames for PosterBoard stability. Trim this video first."];return;}
-    NSString *uuid=PFNewIdentifier(); NSString *dir=[PFLibraryDirectory stringByAppendingPathComponent:uuid]; [[NSFileManager defaultManager]createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-    NSString *source=[dir stringByAppendingPathComponent:[@"source" stringByAppendingPathExtension:temporary.pathExtension ?: @"mov"]]; [[NSFileManager defaultManager]moveItemAtPath:temporary toPath:source error:nil];
-    AVAssetImageGenerator *gen=[[AVAssetImageGenerator alloc]initWithAsset:asset]; gen.appliesPreferredTrackTransform=YES; CGImageRef cg=[gen copyCGImageAtTime:kCMTimeZero actualTime:nil error:nil]; if(cg){[self saveThumbnail:[UIImage imageWithCGImage:cg] directory:dir];CGImageRelease(cg);}
+    NSString *uuid=PFNewIdentifier(); NSString *dir=[PFLibraryDirectory stringByAppendingPathComponent:uuid]; [[NSFileManager defaultManager]createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+    NSString *source=[dir stringByAppendingPathComponent:[@"source" stringByAppendingPathExtension:temporary.pathExtension ?: @"mov"]]; [[NSFileManager defaultManager]moveItemAtPath:temporary toPath:source error:NULL];
+    AVURLAsset *savedAsset=[AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:source] options:nil];
+    AVAssetImageGenerator *gen=[[AVAssetImageGenerator alloc]initWithAsset:savedAsset]; gen.appliesPreferredTrackTransform=YES; CGImageRef cg=[gen copyCGImageAtTime:kCMTimeZero actualTime:NULL error:NULL]; if(cg){[self saveThumbnail:[UIImage imageWithCGImage:cg] directory:dir];CGImageRelease(cg);}
     NSDictionary *item=@{@"identifier":uuid,@"title":[NSString stringWithFormat:@"Video %@",[uuid substringToIndex:4]],@"kind":@"video",@"sourcePath":source,@"thumbnailPath":[dir stringByAppendingPathComponent:@"thumbnail.jpg"],@"homeBlur":@NO,@"created":NSDate.date,@"fps":@15}; [self finishItem:item];
 }
 - (void)saveThumbnail:(UIImage *)image directory:(NSString *)dir { CGSize s=CGSizeMake(160,347); UIGraphicsImageRenderer *r=[[UIGraphicsImageRenderer alloc]initWithSize:s]; UIImage *thumb=[r imageWithActions:^(UIGraphicsImageRendererContext *c){CGFloat scale=MAX(s.width/image.size.width,s.height/image.size.height);CGSize d=CGSizeMake(image.size.width*scale,image.size.height*scale);[image drawInRect:CGRectMake((s.width-d.width)/2,(s.height-d.height)/2,d.width,d.height)];}];[UIImageJPEGRepresentation(thumb,0.8)writeToFile:[dir stringByAppendingPathComponent:@"thumbnail.jpg"] atomically:YES]; }
 - (void)finishItem:(NSDictionary *)item {
     UIAlertController *name=[UIAlertController alertControllerWithTitle:@"Wallpaper name" message:@"This name is shown in PosterForge." preferredStyle:UIAlertControllerStyleAlert];
     [name addTextFieldWithConfigurationHandler:^(UITextField *field){field.text=item[@"title"];field.clearButtonMode=UITextFieldViewModeWhileEditing;}];
-    [name addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a){[[NSFileManager defaultManager]removeItemAtPath:[PFLibraryDirectory stringByAppendingPathComponent:item[@"identifier"]] error:nil];}]];
+    [name addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a){[[NSFileManager defaultManager]removeItemAtPath:[PFLibraryDirectory stringByAppendingPathComponent:item[@"identifier"]] error:NULL];}]];
     [name addAction:[UIAlertAction actionWithTitle:@"Add" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){NSMutableDictionary *named=item.mutableCopy;NSString *value=name.textFields.firstObject.text;if(value.length)named[@"title"]=value;NSError *e=nil;if(PFSaveItem(named,&e)&&PFQueueRequest(@{@"action":@"install",@"identifier":named[@"identifier"]},&e)){[self reload];[self alert:@"Wallpaper is being generated. It will appear in Add Wallpaper → Collections after PosterBoard refreshes."];}else [self alert:e.localizedDescription];}]];
     [self presentViewController:name animated:YES completion:nil];
 }
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    [controller dismissViewControllerAnimated:YES completion:^{
     NSURL *url=urls.firstObject;if(!url)return; if(![url.pathExtension.lowercaseString isEqual:@"tendies"]){[self alert:@"Choose a .tendies package."];return;}
     NSString *copy=[PFRootDirectory stringByAppendingPathComponent:[PFNewIdentifier() stringByAppendingPathExtension:@"tendies"]]; NSError *e=nil;[[NSFileManager defaultManager]copyItemAtURL:url toURL:[NSURL fileURLWithPath:copy] error:&e]; if(!e)PFQueueRequest(@{@"action":@"tendies",@"path":copy},&e); [self alert:e?e.localizedDescription:@"Tendies package queued for import."];
+    }];
 }
 - (void)alert:(NSString *)message { UIAlertController *a=[UIAlertController alertControllerWithTitle:@"PosterForge" message:message preferredStyle:UIAlertControllerStyleAlert];[a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];[self presentViewController:a animated:YES completion:nil]; }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section{return _items.count;}

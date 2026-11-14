@@ -6,6 +6,7 @@
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>UserName</key><string>root</string>
+  <key>Umask</key><integer>18</integer>
   <key>StandardOutPath</key><string>/var/mobile/Library/Logs/PosterForge.log</string>
   <key>StandardErrorPath</key><string>/var/mobile/Library/Logs/PosterForge.log</string>
 </dict></plist>

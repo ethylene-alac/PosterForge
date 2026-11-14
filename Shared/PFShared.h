@@ -13,5 +13,8 @@ FOUNDATION_EXPORT NSArray<NSDictionary *> *PFLoadItems(void);
 FOUNDATION_EXPORT BOOL PFSaveItem(NSDictionary *item, NSError **error);
 FOUNDATION_EXPORT BOOL PFDeleteItem(NSString *identifier, NSError **error);
 FOUNDATION_EXPORT BOOL PFQueueRequest(NSDictionary *request, NSError **error);
-FOUNDATION_EXPORT NSString *PFPosterBoardContainer(void);
+FOUNDATION_EXPORT NSString * _Nullable PFPosterBoardContainer(void);
+FOUNDATION_EXPORT NSString * _Nullable PFPosterBoardContainerWithError(NSError **error);
+// The base-path variant is also used by host tests with disposable containers.
+FOUNDATION_EXPORT NSString * _Nullable PFFindPosterBoardContainer(NSString *base, NSError **error);
 NS_ASSUME_NONNULL_END
