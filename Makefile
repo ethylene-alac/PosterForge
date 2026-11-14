@@ -5,10 +5,11 @@ THEOS_PACKAGE_SCHEME = rootless
 include $(THEOS)/makefiles/common.mk
 
 TOOL_NAME = posterforged
-posterforged_FILES = Daemon/main.m Shared/PFShared.m Daemon/PFPosterBuilder.m
+posterforged_FILES = Daemon/main.m Shared/PFShared.m Daemon/PFPosterBuilder.m Daemon/PFTendiesArchive.m
 posterforged_CFLAGS = -fobjc-arc
-posterforged_FRAMEWORKS = Foundation UIKit AVFoundation CoreImage CoreGraphics
-posterforged_CODESIGN_FLAGS = -Sentitlements.plist
+posterforged_FRAMEWORKS = Foundation CoreFoundation UIKit AVFoundation CoreImage CoreGraphics
+posterforged_LIBRARIES = z
+posterforged_CODESIGN_FLAGS = -S$(THEOS_PROJECT_DIR)/Entitlements.plist
 posterforged_INSTALL_PATH = /usr/libexec
 include $(THEOS_MAKE_PATH)/tool.mk
 

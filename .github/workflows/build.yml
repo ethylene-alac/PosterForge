@@ -1,29 +1,100 @@
 name: Build rootless deb
 on:
   workflow_dispatch:
+    inputs:
+      publish_apt_repository:
+        description: Publish this build to the public gh-pages APT repository
+        type: boolean
+        default: false
   push:
     branches: [ main ]
+  pull_request:
 permissions:
-  contents: write
+  contents: read
 jobs:
   build:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Regression tests (real Objective-C scanner and ZIP importer)
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          plutil -lint Entitlements.plist Preferences/Resources/Info.plist layout/Library/LaunchDaemons/com.posterforge.daemon.plist layout/Library/PreferenceLoader/Preferences/PosterForge.plist
+          sh Tests/run-host-tests.sh 2>&1 | tee build/host-tests.log
       - name: Install Theos
         run: |
           brew install ldid make xz dpkg
           git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
       - name: Build
-        env:
-          THEOS: ${{ github.workspace }}/../theos
         run: |
+          set -euo pipefail
           export THEOS="$HOME/theos"
-          gmake clean package FINALPACKAGE=1
+          mkdir -p build
+          {
+            git rev-parse HEAD
+            git -C "$THEOS" rev-parse HEAD
+            git -C "$THEOS" submodule status --recursive
+            xcodebuild -version
+            xcrun --sdk iphoneos --show-sdk-version
+          } > build/toolchain.txt
+          gmake clean
+          gmake package FINALPACKAGE=1 ARCHS="arm64 arm64e" TARGET=iphone:clang:latest:16.0 THEOS_PACKAGE_SCHEME=rootless 2>&1 | tee build/build.log
+      - name: Verify package layout, architectures and signed entitlements
+        run: |
+          set -euo pipefail
+          debs=(packages/*.deb)
+          test "${#debs[@]}" -eq 1
+          deb="${debs[0]}"
+          test "$(dpkg-deb -f "$deb" Architecture)" = iphoneos-arm64
+          test "$(dpkg-deb -f "$deb" Version)" = 0.1.1
+          mkdir -p build/package
+          dpkg-deb -x "$deb" build/package
+          dpkg-deb -e "$deb" build/package-control
+          python3 Tests/verify_package.py build/package build/package-control
+          daemon=build/package/var/jb/usr/libexec/posterforged
+          prefs=build/package/var/jb/Library/PreferenceBundles/PosterForgePrefs.bundle/PosterForgePrefs
+          for binary in "$daemon" "$prefs"; do
+            xcrun lipo "$binary" -verify_arch arm64 arm64e
+            for arch in arm64 arm64e; do
+              xcrun lipo "$binary" -thin "$arch" -output "build/$(basename "$binary")-$arch"
+              python3 Tests/verify_macho.py "build/$(basename "$binary")-$arch" "$arch"
+              xcrun vtool -show-build "build/$(basename "$binary")-$arch" | tee -a build/macho-build-versions.txt
+            done
+          done
+          for arch in arm64 arm64e; do
+            ldid -e "build/posterforged-$arch" > "build/entitlements-$arch.plist"
+            python3 Tests/verify_entitlements.py "build/entitlements-$arch.plist"
+          done
+          (cd packages && shasum -a 256 *.deb > SHA256SUMS)
+          cp build/toolchain.txt packages/
       - uses: actions/upload-artifact@v4
         with:
-          name: PosterForge-rootless
-          path: packages/*.deb
+          name: PosterForge-0.1.1-rootless
+          path: packages/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PosterForge-build-diagnostics
+          path: |
+            build/*.log
+            build/*.txt
+            build/entitlements-*.plist
+          if-no-files-found: ignore
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_apt_repository
+    needs: build
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: PosterForge-0.1.1-rootless
+          path: packages
+      - name: Install APT packaging tools
+        run: brew install dpkg
       - name: Create APT repository
         run: |
           mkdir -p repo/debs
@@ -38,7 +109,7 @@ jobs:
           Suite: stable
           Version: 1.0
           Codename: ios
-          Architectures: iphoneos-arm
+          Architectures: iphoneos-arm64
           Components: main
           Description: Native photo and video wallpapers for iOS 16
           EOF

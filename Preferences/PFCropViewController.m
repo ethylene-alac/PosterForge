@@ -8,6 +8,7 @@
 @property UISwitch *blurSwitch;
 @property (copy) void (^completion)(UIImage *, BOOL);
 @property BOOL zoomConfigured;
+@property BOOL finishing;
 @end
 
 @implementation PFCropViewController
@@ -45,11 +46,20 @@
 - (UIView *)viewForZoomingInScrollView:(UIScrollView *)scrollView{return _imageView;}
 - (void)cancel{[self dismissViewControllerAnimated:YES completion:nil];}
 - (void)done {
+    if (_finishing) return;
+    _finishing=YES; self.navigationItem.rightBarButtonItem.enabled=NO; self.navigationItem.leftBarButtonItem.enabled=NO;
     CGFloat z=_scroll.zoomScale; CGRect visible=CGRectMake(_scroll.contentOffset.x/z,_scroll.contentOffset.y/z,_scroll.bounds.size.width/z,_scroll.bounds.size.height/z);
-    visible=CGRectIntersection(visible,(CGRect){CGPointZero,_image.size}); CGImageRef cg=CGImageCreateWithImageInRect(_image.CGImage,visible); UIImage *crop=[UIImage imageWithCGImage:cg]; CGImageRelease(cg);
+    visible=CGRectIntersection(visible,(CGRect){CGPointZero,_image.size});
+    CGImageRef cg=CGRectIsEmpty(visible)?NULL:CGImageCreateWithImageInRect(_image.CGImage,visible);
+    if(!cg){_finishing=NO;self.navigationItem.rightBarButtonItem.enabled=YES;self.navigationItem.leftBarButtonItem.enabled=YES;return;}
+    UIImage *crop=[UIImage imageWithCGImage:cg]; CGImageRelease(cg);
     CGSize target=UIScreen.mainScreen.nativeBounds.size; if(target.width>target.height)target=CGSizeMake(target.height,target.width);
     UIGraphicsImageRendererFormat *fmt=[UIGraphicsImageRendererFormat defaultFormat]; fmt.scale=1;
     UIImage *output=[[[UIGraphicsImageRenderer alloc]initWithSize:target format:fmt] imageWithActions:^(UIGraphicsImageRendererContext *c){[crop drawInRect:(CGRect){CGPointZero,target}];}];
-    if(_completion)_completion(output,_blurSwitch.on); [self dismissViewControllerAnimated:YES completion:nil];
+    void (^completion)(UIImage *, BOOL)=[_completion copy]; BOOL blur=_blurSwitch.on; _completion=nil;
+    // The root Preferences controller can present the naming alert only after
+    // its presented navigation controller has finished dismissing.
+    UIViewController *modal=self.navigationController ?: self;
+    [modal dismissViewControllerAnimated:YES completion:^{if(completion)completion(output,blur);}];
 }
 @end
