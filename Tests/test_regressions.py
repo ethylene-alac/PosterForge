@@ -53,6 +53,8 @@ class RuntimeTests(unittest.TestCase):
 
     def run_harness(self, *args):
         run = subprocess.run([BIN, *map(str, args)], capture_output=True, text=True, check=False)
+        self.assertIn(run.returncode, (0, 1), f"Harness exited abnormally: {run.returncode}\n{run.stderr}")
+        self.assertTrue(run.stdout.strip(), f"Harness returned no JSON: {run.stderr}")
         result = json.loads(run.stdout)
         self.assertEqual(run.returncode, 0 if result["success"] else 1, run.stderr)
         return result

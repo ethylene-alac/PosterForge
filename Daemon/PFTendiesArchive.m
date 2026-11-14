@@ -11,6 +11,34 @@ static BOOL PFFail(NSError **error, NSString *message) {
 static uint16_t U16(const uint8_t *p) { return p[0] | ((uint16_t)p[1] << 8); }
 static uint32_t U32(const uint8_t *p) { return U16(p) | ((uint32_t)U16(p + 2) << 16); }
 
+static BOOL PFExtractEntry(NSDictionary *entry, const uint8_t *bytes, NSString *staging, NSError **error) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *destination = [staging stringByAppendingPathComponent:entry[@"name"]];
+    if (![fm createDirectoryAtPath:destination.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0755} error:error]) return NO;
+    NSUInteger uncompressed = [entry[@"size"] unsignedIntegerValue], compressed = [entry[@"compressed"] unsignedIntegerValue];
+    const uint8_t *payload = bytes + [entry[@"payload"] unsignedIntegerValue];
+    NSMutableData *output = [NSMutableData dataWithLength:MAX((NSUInteger)1, uncompressed)];
+    if ([entry[@"method"] intValue] == 0) {
+        if (uncompressed != compressed) return PFFail(error, @"Invalid stored ZIP size");
+        memcpy(output.mutableBytes, payload, uncompressed);
+    } else {
+        z_stream stream = {0};
+        stream.next_in = (Bytef *)payload; stream.avail_in = (uInt)compressed;
+        stream.next_out = output.mutableBytes; stream.avail_out = (uInt)output.length;
+        if (inflateInit2(&stream, -MAX_WBITS) != Z_OK) return PFFail(error, @"Cannot initialize ZIP decompressor");
+        int rc = inflate(&stream, Z_FINISH);
+        BOOL valid = rc == Z_STREAM_END && stream.total_out == uncompressed && stream.total_in == compressed;
+        inflateEnd(&stream);
+        if (!valid) return PFFail(error, @"Invalid deflated ZIP data");
+    }
+    output.length = uncompressed;
+    if ((uint32_t)crc32(0L, output.bytes, (uInt)uncompressed) != [entry[@"crc"] unsignedIntValue])
+        return PFFail(error, @"ZIP checksum mismatch");
+    if ([entry[@"directory"] boolValue])
+        return [fm createDirectoryAtPath:destination withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0755} error:error];
+    return [output writeToFile:destination options:NSDataWritingWithoutOverwriting error:error];
+}
+
 BOOL PFExtractTendiesArchive(NSString *path, NSString *staging, NSError **error) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSDictionary *attributes = [fm attributesOfItemAtPath:path error:error];
@@ -92,33 +120,16 @@ BOOL PFExtractTendiesArchive(NSString *path, NSString *staging, NSError **error)
         if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSFilePathErrorKey:staging}];
         return NO;
     }
-    for (NSDictionary *entry in entries) @autoreleasepool {
-        NSString *destination = [staging stringByAppendingPathComponent:entry[@"name"]];
-        if (![fm createDirectoryAtPath:destination.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0755} error:error]) return NO;
-        NSUInteger uncompressed = [entry[@"size"] unsignedIntegerValue], compressed = [entry[@"compressed"] unsignedIntegerValue];
-        const uint8_t *payload = bytes + [entry[@"payload"] unsignedIntegerValue];
-        NSMutableData *output = [NSMutableData dataWithLength:MAX((NSUInteger)1, uncompressed)];
-        if ([entry[@"method"] intValue] == 0) {
-            if (uncompressed != compressed) return PFFail(error, @"Invalid stored ZIP size");
-            memcpy(output.mutableBytes, payload, uncompressed);
-        } else {
-            z_stream stream = {0};
-            stream.next_in = (Bytef *)payload; stream.avail_in = (uInt)compressed;
-            stream.next_out = output.mutableBytes; stream.avail_out = (uInt)output.length;
-            if (inflateInit2(&stream, -MAX_WBITS) != Z_OK) return PFFail(error, @"Cannot initialize ZIP decompressor");
-            int rc = inflate(&stream, Z_FINISH);
-            BOOL valid = rc == Z_STREAM_END && stream.total_out == uncompressed && stream.total_in == compressed;
-            inflateEnd(&stream);
-            if (!valid) return PFFail(error, @"Invalid deflated ZIP data");
+    for (NSDictionary *entry in entries) {
+        // Retain errors before draining the entry's pool. An autoreleasing
+        // out-parameter pointing into that pool would dangle on CRC/write failure.
+        NSError *entryError = nil;
+        BOOL extracted = NO;
+        @autoreleasepool { extracted = PFExtractEntry(entry, bytes, staging, &entryError); }
+        if (!extracted) {
+            if (error) *error = entryError;
+            return NO;
         }
-        output.length = uncompressed;
-        if ((uint32_t)crc32(0L, output.bytes, (uInt)uncompressed) != [entry[@"crc"] unsignedIntValue])
-            return PFFail(error, @"ZIP checksum mismatch");
-        if ([entry[@"directory"] boolValue]) {
-            if (![fm createDirectoryAtPath:destination withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0755} error:error]) return NO;
-            continue;
-        }
-        if (![output writeToFile:destination options:NSDataWritingWithoutOverwriting error:error]) return NO;
     }
     return YES;
 }
