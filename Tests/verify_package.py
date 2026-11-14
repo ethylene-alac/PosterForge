@@ -12,6 +12,10 @@ with (package / "var/jb/Library/LaunchDaemons/com.posterforge.daemon.plist").ope
     launch = plistlib.load(stream)
 assert launch["ProgramArguments"] == ["/var/jb/usr/libexec/posterforged"]
 assert launch["UserName"] == "root"
+assert launch["ProcessType"] == "Background"
+assert launch["JetsamProperties"]["JetsamMemoryLimit"] == 192
+diagnostic = package / "var/jb/usr/libexec/posterforge-diagnose-service"
+assert diagnostic.is_file() and diagnostic.stat().st_mode & 0o111
 for name in ("postinst", "prerm"):
     script = control / name
     assert script.stat().st_mode & 0o111, f"{name} must be executable"

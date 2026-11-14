@@ -5,7 +5,7 @@ THEOS_PACKAGE_SCHEME = rootless
 include $(THEOS)/makefiles/common.mk
 
 TOOL_NAME = posterforged
-posterforged_FILES = Daemon/main.m Shared/PFShared.m Daemon/PFPosterBuilder.m Daemon/PFTendiesArchive.m
+posterforged_FILES = Daemon/main.m Shared/PFShared.m Daemon/PFPosterBuilder.m Daemon/PFTendiesArchive.m Daemon/PFMemory.m
 posterforged_CFLAGS = -fobjc-arc
 posterforged_FRAMEWORKS = Foundation CoreFoundation UIKit AVFoundation CoreImage CoreGraphics
 posterforged_LIBRARIES = z
@@ -18,6 +18,7 @@ include $(THEOS_MAKE_PATH)/aggregate.mk
 
 before-package::
 	chmod 0755 $(THEOS_PROJECT_DIR)/layout/DEBIAN/postinst $(THEOS_PROJECT_DIR)/layout/DEBIAN/prerm
+	install -m 0755 $(THEOS_PROJECT_DIR)/Tools/diagnose-service.sh $(THEOS_STAGING_DIR)$(THEOS_PACKAGE_INSTALL_PREFIX)/usr/libexec/posterforge-diagnose-service
 
 after-install::
-	install.exec "launchctl kickstart -k system/com.posterforge.daemon || true; killall -9 Preferences PosterBoard 2>/dev/null || true"
+	install.exec "launchctl kickstart -k system/com.posterforge.daemon || true"

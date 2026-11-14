@@ -17,5 +17,6 @@ fi
 if ! launchctl kickstart -k system/com.posterforge.daemon; then
     echo "PosterForge: daemon did not start; inspect /var/mobile/Library/Logs/PosterForge.log" >&2
 fi
-killall -9 Preferences PosterBoard 2>/dev/null || true
+echo "PosterForge: expected service domain is system/com.posterforge.daemon (ProcessType Background is a scheduling class, not a bootstrap domain)."
+launchctl print system/com.posterforge.daemon 2>&1 || true
 exit 0

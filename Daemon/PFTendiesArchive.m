@@ -3,6 +3,8 @@
 #import <zlib.h>
 #import <string.h>
 #import <errno.h>
+#import <fcntl.h>
+#import <unistd.h>
 
 static BOOL PFFail(NSError **error, NSString *message) {
     if (error) *error = [NSError errorWithDomain:@"com.posterforge.tendies" code:1 userInfo:@{NSLocalizedDescriptionKey:message}];
@@ -11,67 +13,120 @@ static BOOL PFFail(NSError **error, NSString *message) {
 static uint16_t U16(const uint8_t *p) { return p[0] | ((uint16_t)p[1] << 8); }
 static uint32_t U32(const uint8_t *p) { return U16(p) | ((uint32_t)U16(p + 2) << 16); }
 
-static BOOL PFExtractEntry(NSDictionary *entry, const uint8_t *bytes, NSString *staging, NSError **error) {
+static BOOL PFPOSIXError(NSError **error, NSString *path) {
+    int code=errno ?: EIO;
+    if(error)*error=[NSError errorWithDomain:NSPOSIXErrorDomain code:code userInfo:@{NSFilePathErrorKey:path}];
+    return NO;
+}
+
+static BOOL PFReadAt(int fd, void *buffer, size_t length, off_t offset, NSError **error) {
+    uint8_t *cursor=buffer;
+    while(length) {
+        ssize_t count=pread(fd,cursor,length,offset);
+        if(count<0&&errno==EINTR)continue;
+        if(count<0)return PFPOSIXError(error,@"Tendies ZIP read");
+        if(!count)return PFFail(error,@"Truncated Tendies ZIP payload");
+        cursor+=count;offset+=count;length-=(size_t)count;
+    }
+    return YES;
+}
+
+static BOOL PFWriteAll(int fd, const uint8_t *buffer, size_t length, NSError **error) {
+    while(length) {
+        ssize_t count=write(fd,buffer,length);
+        if(count<0&&errno==EINTR)continue;
+        if(count<=0)return PFPOSIXError(error,@"Tendies staged file write");
+        buffer+=count;length-=(size_t)count;
+    }
+    return YES;
+}
+
+static BOOL PFExtractEntry(NSDictionary *entry, int archive, NSString *staging, NSError **error) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *destination = [staging stringByAppendingPathComponent:entry[@"name"]];
     if (![fm createDirectoryAtPath:destination.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0755} error:error]) return NO;
     NSUInteger uncompressed = [entry[@"size"] unsignedIntegerValue], compressed = [entry[@"compressed"] unsignedIntegerValue];
-    const uint8_t *payload = bytes + [entry[@"payload"] unsignedIntegerValue];
-    NSMutableData *output = [NSMutableData dataWithLength:MAX((NSUInteger)1, uncompressed)];
-    if ([entry[@"method"] intValue] == 0) {
-        if (uncompressed != compressed) return PFFail(error, @"Invalid stored ZIP size");
-        memcpy(output.mutableBytes, payload, uncompressed);
-    } else {
-        z_stream stream = {0};
-        stream.next_in = (Bytef *)payload; stream.avail_in = (uInt)compressed;
-        stream.next_out = output.mutableBytes; stream.avail_out = (uInt)output.length;
-        if (inflateInit2(&stream, -MAX_WBITS) != Z_OK) return PFFail(error, @"Cannot initialize ZIP decompressor");
-        int rc = inflate(&stream, Z_FINISH);
-        BOOL valid = rc == Z_STREAM_END && stream.total_out == uncompressed && stream.total_in == compressed;
-        inflateEnd(&stream);
-        if (!valid) return PFFail(error, @"Invalid deflated ZIP data");
+    off_t position=[entry[@"payload"] longLongValue];
+    BOOL directory=[entry[@"directory"] boolValue], deflated=[entry[@"method"] intValue]==8;
+    if(!deflated&&uncompressed!=compressed)return PFFail(error,@"Invalid stored ZIP size");
+    int output=directory?-1:open(destination.fileSystemRepresentation,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0644);
+    if(!directory&&output<0)return PFPOSIXError(error,destination);
+    uint8_t inputBuffer[65536], outputBuffer[65536];
+    z_stream stream={0};
+    BOOL initialized=NO, ok=YES, ended=NO;
+    uint64_t producedTotal=0;
+    uLong checksum=crc32(0L,Z_NULL,0);
+    if(deflated) {
+        initialized=inflateInit2(&stream,-MAX_WBITS)==Z_OK;
+        if(!initialized)ok=PFFail(error,@"Cannot initialize ZIP decompressor");
     }
-    output.length = uncompressed;
-    if ((uint32_t)crc32(0L, output.bytes, (uInt)uncompressed) != [entry[@"crc"] unsignedIntValue])
-        return PFFail(error, @"ZIP checksum mismatch");
-    if ([entry[@"directory"] boolValue])
-        return [fm createDirectoryAtPath:destination withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0755} error:error];
-    return [output writeToFile:destination options:NSDataWritingWithoutOverwriting error:error];
+    NSUInteger remaining=compressed;
+    while(ok&&(!ended)&&(remaining||stream.avail_in||deflated)) {
+        if(!stream.avail_in&&remaining) {
+            size_t count=MIN(sizeof(inputBuffer),remaining);
+            if(!PFReadAt(archive,inputBuffer,count,position,error)){ok=NO;break;}
+            position+=(off_t)count;remaining-=count;
+            stream.next_in=inputBuffer;stream.avail_in=(uInt)count;
+        }
+        const uint8_t *chunk=inputBuffer;
+        size_t count=stream.avail_in;
+        if(deflated) {
+            stream.next_out=outputBuffer;stream.avail_out=sizeof(outputBuffer);
+            uInt previousInput=stream.avail_in;
+            int rc=inflate(&stream,Z_NO_FLUSH);
+            count=sizeof(outputBuffer)-stream.avail_out;chunk=outputBuffer;
+            ended=rc==Z_STREAM_END;
+            if((rc!=Z_OK&&!ended)||(!ended&&!count&&previousInput==stream.avail_in)) {
+                ok=PFFail(error,@"Invalid or truncated deflated ZIP data");break;
+            }
+            if(ended&&(remaining||stream.avail_in)){ok=PFFail(error,@"Unexpected trailing deflated ZIP data");break;}
+        } else stream.avail_in=0;
+        if(producedTotal+count>uncompressed){ok=PFFail(error,@"ZIP output exceeds declared size");break;}
+        producedTotal+=count;checksum=crc32(checksum,chunk,(uInt)count);
+        if(!directory&&count&&!PFWriteAll(output,chunk,count,error)){ok=NO;break;}
+        if(!deflated&&!remaining)ended=YES;
+    }
+    if(initialized)inflateEnd(&stream);
+    if(ok&&(producedTotal!=uncompressed||(deflated&&!ended)))ok=PFFail(error,@"Invalid ZIP expanded size");
+    if(ok&&(uint32_t)checksum!=[entry[@"crc"] unsignedIntValue])ok=PFFail(error,@"ZIP checksum mismatch");
+    if(output>=0&&close(output)!=0&&ok)ok=PFPOSIXError(error,destination);
+    if(!ok){if(output>=0)unlink(destination.fileSystemRepresentation);return NO;}
+    return !directory||[fm createDirectoryAtPath:destination withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0755} error:error];
 }
 
-BOOL PFExtractTendiesArchive(NSString *path, NSString *staging, NSError **error) {
+static BOOL PFExtractZIP(int archive, NSUInteger length, NSString *staging, NSError **error) {
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSDictionary *attributes = [fm attributesOfItemAtPath:path error:error];
-    if (!attributes) return NO;
-    if (![attributes[NSFileType] isEqual:NSFileTypeRegular] || [attributes[NSFileSize] unsignedLongLongValue] > 256ULL * 1024 * 1024)
-        return PFFail(error, @"Tendies archive must be a regular ZIP file no larger than 256 MiB");
-    NSData *data = [NSData dataWithContentsOfFile:path options:0 error:error];
-    if (!data) return NO;
-    const uint8_t *bytes = data.bytes;
-    NSUInteger length = data.length, end = NSNotFound;
     if (length < 22) return PFFail(error, @"Truncated Tendies ZIP");
-    NSUInteger minimum = length > 65557 ? length - 65557 : 0;
-    for (NSUInteger i = length - 22;; i--) {
-        if (U32(bytes + i) == 0x06054b50 && i + 22 + U16(bytes + i + 20) == length) { end = i; break; }
-        if (i == minimum) break;
+    NSUInteger tailLength=MIN(length,(NSUInteger)65557), end=NSNotFound;
+    NSMutableData *tail=[NSMutableData dataWithLength:tailLength];
+    if(!PFReadAt(archive,tail.mutableBytes,tailLength,(off_t)(length-tailLength),error))return NO;
+    const uint8_t *bytes=tail.bytes;
+    for (NSUInteger i = tailLength - 22;; i--) {
+        if (U32(bytes + i) == 0x06054b50 && i + 22 + U16(bytes + i + 20) == tailLength) { end = length-tailLength+i; break; }
+        if (i == 0) break;
     }
     if (end == NSNotFound) return PFFail(error, @"Missing ZIP central directory");
-    const uint8_t *eocd = bytes + end;
+    const uint8_t *eocd = bytes + end-(length-tailLength);
     NSUInteger count = U16(eocd + 10), size = U32(eocd + 12), offset = U32(eocd + 16);
     if (U16(eocd + 4) || U16(eocd + 6) || U16(eocd + 8) != count || count == 65535 ||
-        !count || count > 20000 || offset > end || size != end - offset)
+        !count || count > 20000 || size>8*1024*1024 || offset > end || size != end - offset)
         return PFFail(error, @"Unsupported multi-disk/ZIP64 ZIP or invalid directory bounds");
     NSMutableArray<NSDictionary *> *entries = [NSMutableArray array];
     NSMutableDictionary<NSString *, NSNumber *> *paths = [NSMutableDictionary dictionary];
-    uint64_t total = 0;
+    uint64_t total = 0, pathBytes=0;
     for (NSUInteger index = 0; index < count; index++) {
-        if (offset > end || end - offset < 46 || U32(bytes + offset) != 0x02014b50)
+        uint8_t header[46];
+        if (offset > end || end - offset < 46 || !PFReadAt(archive,header,sizeof(header),offset,error))
             return PFFail(error, @"Invalid ZIP directory entry");
-        const uint8_t *h = bytes + offset;
+        const uint8_t *h = header;
+        if(U32(h)!=0x02014b50)return PFFail(error,@"Invalid ZIP directory entry signature");
         NSUInteger nameLength = U16(h + 28), extraLength = U16(h + 30), commentLength = U16(h + 32);
         NSUInteger next = offset + 46 + nameLength + extraLength + commentLength;
-        if (!nameLength || next > end) return PFFail(error, @"Invalid ZIP filename bounds");
-        NSString *name = [[NSString alloc] initWithBytes:h + 46 length:nameLength encoding:NSUTF8StringEncoding];
+        pathBytes+=nameLength;
+        if (!nameLength || nameLength>1024 || pathBytes>4*1024*1024 || next > end) return PFFail(error, @"Invalid or excessive ZIP filename bounds");
+        NSMutableData *nameBytes=[NSMutableData dataWithLength:nameLength];
+        if(!PFReadAt(archive,nameBytes.mutableBytes,nameLength,offset+46,error))return NO;
+        NSString *name = [[NSString alloc] initWithData:nameBytes encoding:NSUTF8StringEncoding];
         if (!name || [name hasPrefix:@"/"] || [name containsString:@"\\"] || [name containsString:@":"] ||
             [name rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound)
             return PFFail(error, @"Unsafe or non-UTF8 path in Tendies archive");
@@ -95,14 +150,19 @@ BOOL PFExtractTendiesArchive(NSString *path, NSString *staging, NSError **error)
         total += uncompressed;
         if ((flags & ~0x080E) || (method != 0 && method != 8) || U16(h + 34) ||
             uncompressed > 256ULL * 1024 * 1024 || total > 1024ULL * 1024 * 1024 ||
-            local > U32(eocd + 16) || U32(eocd + 16) - local < 30 || U32(bytes + local) != 0x04034b50)
+            local > U32(eocd + 16) || U32(eocd + 16) - local < 30)
             return PFFail(error, @"Unsupported ZIP encryption/compression, excessive size, or invalid local header");
-        const uint8_t *lh = bytes + local;
+        uint8_t localHeader[30];
+        if(!PFReadAt(archive,localHeader,sizeof(localHeader),local,error))return NO;
+        const uint8_t *lh = localHeader;
         NSUInteger payload = local + 30 + U16(lh + 26) + U16(lh + 28);
-        if (U16(lh + 6) != flags || U16(lh + 8) != method || U16(lh + 26) != nameLength ||
+        if (U32(lh)!=0x04034b50 || U16(lh + 6) != flags || U16(lh + 8) != method || U16(lh + 26) != nameLength ||
             payload > U32(eocd + 16) || compressed > U32(eocd + 16) - payload ||
-            memcmp(lh + 30, h + 46, nameLength) != 0 || (directory && uncompressed))
+            (directory && uncompressed))
             return PFFail(error, @"ZIP local and central headers disagree");
+        NSMutableData *localName=[NSMutableData dataWithLength:nameLength];
+        if(!PFReadAt(archive,localName.mutableBytes,nameLength,local+30,error))return NO;
+        if(![localName isEqualToData:nameBytes])return PFFail(error,@"ZIP local and central headers disagree");
         [entries addObject:@{@"name":clean, @"directory":@(directory), @"method":@(method), @"payload":@(payload),
                              @"compressed":@(compressed), @"size":@(uncompressed), @"crc":@(U32(h + 16))}];
         offset = next;
@@ -125,13 +185,27 @@ BOOL PFExtractTendiesArchive(NSString *path, NSString *staging, NSError **error)
         // out-parameter pointing into that pool would dangle on CRC/write failure.
         NSError *entryError = nil;
         BOOL extracted = NO;
-        @autoreleasepool { extracted = PFExtractEntry(entry, bytes, staging, &entryError); }
+        @autoreleasepool { extracted = PFExtractEntry(entry, archive, staging, &entryError); }
         if (!extracted) {
             if (error) *error = entryError;
             return NO;
         }
     }
     return YES;
+}
+
+BOOL PFExtractTendiesArchive(NSString *path, NSString *staging, NSError **error) {
+    int archive=open(path.fileSystemRepresentation,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
+    if(archive<0)return PFPOSIXError(error,path);
+    BOOL ok=NO;
+    @try {
+        struct stat attributes;
+        if(fstat(archive,&attributes)!=0)return PFPOSIXError(error,path);
+        if(!S_ISREG(attributes.st_mode)||attributes.st_size<0||attributes.st_size>256LL*1024*1024)
+            return PFFail(error,@"Tendies archive must be a regular ZIP file no larger than 256 MiB");
+        ok=PFExtractZIP(archive,(NSUInteger)attributes.st_size,staging,error);
+    } @finally { close(archive); }
+    return ok;
 }
 
 NSArray<NSString *> *PFTendiesDescriptorPaths(NSString *staging, NSError **error) {
@@ -168,15 +242,12 @@ NSArray<NSString *> *PFTendiesDescriptorPaths(NSString *staging, NSError **error
     return [result sortedArrayUsingSelector:@selector(compare:)];
 }
 
-BOOL PFRandomizeTendiesDescriptor(NSString *path, NSInteger newID, NSError **error) {
-    if (![[NSString stringWithFormat:@"%ld", (long)newID] writeToFile:[path stringByAppendingPathComponent:@"com.apple.posterkit.provider.descriptor.identifier"]
-        atomically:YES encoding:NSUTF8StringEncoding error:error]) return NO;
-    __block NSError *enumerationError = nil;
-    NSDirectoryEnumerator *en = [NSFileManager.defaultManager enumeratorAtURL:[NSURL fileURLWithPath:path] includingPropertiesForKeys:nil options:0
-        errorHandler:^BOOL(NSURL *url, NSError *e) { enumerationError = e; return NO; }];
-    for (NSURL *url in en) {
+static BOOL PFUpdateDescriptorPlist(NSURL *url, NSInteger newID, NSError **error) {
         NSString *name = url.lastPathComponent;
-        if (![name isEqual:@"Wallpaper.plist"] && ![name isEqual:@"com.apple.posterkit.provider.contents.userInfo"]) continue;
+        if (![name isEqual:@"Wallpaper.plist"] && ![name isEqual:@"com.apple.posterkit.provider.contents.userInfo"]) return YES;
+        NSDictionary *attributes=[NSFileManager.defaultManager attributesOfItemAtPath:url.path error:error];
+        if(!attributes)return NO;
+        if([attributes[NSFileSize] unsignedLongLongValue]>1024*1024)return PFFail(error,@"Descriptor metadata plist exceeds 1 MiB");
         NSData *data = [NSData dataWithContentsOfURL:url options:0 error:error]; if (!data) return NO;
         id plist = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListMutableContainers format:NULL error:error];
         if (![plist isKindOfClass:NSMutableDictionary.class]) return PFFail(error, @"Descriptor metadata must be a dictionary plist");
@@ -186,6 +257,19 @@ BOOL PFRandomizeTendiesDescriptor(NSString *path, NSInteger newID, NSError **err
         } else plist[@"wallpaperRepresentingIdentifier"] = [NSString stringWithFormat:@"%ld", (long)newID];
         NSData *updated = [NSPropertyListSerialization dataWithPropertyList:plist format:NSPropertyListBinaryFormat_v1_0 options:0 error:error];
         if (!updated || ![updated writeToURL:url options:NSDataWritingAtomic error:error]) return NO;
+    return YES;
+}
+
+BOOL PFRandomizeTendiesDescriptor(NSString *path, NSInteger newID, NSError **error) {
+    if (![[NSString stringWithFormat:@"%ld", (long)newID] writeToFile:[path stringByAppendingPathComponent:@"com.apple.posterkit.provider.descriptor.identifier"]
+        atomically:YES encoding:NSUTF8StringEncoding error:error]) return NO;
+    __block NSError *enumerationError = nil;
+    NSDirectoryEnumerator *en = [NSFileManager.defaultManager enumeratorAtURL:[NSURL fileURLWithPath:path] includingPropertiesForKeys:nil options:0
+        errorHandler:^BOOL(NSURL *url, NSError *e) { enumerationError = e; return NO; }];
+    for (NSURL *url in en) {
+        NSError *entryError=nil;BOOL ok=NO;
+        @autoreleasepool { ok=PFUpdateDescriptorPlist(url,newID,&entryError); }
+        if(!ok){if(error)*error=entryError;return NO;}
     }
     if (enumerationError) { if (error) *error = enumerationError; return NO; }
     return YES;

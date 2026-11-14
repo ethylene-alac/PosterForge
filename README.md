@@ -28,6 +28,13 @@ renders each installed descriptor, which is substantially safer across iOS 16 po
 
 ## Build
 
+0.1.2 addresses the daemon's 6 MiB per-process Jetsam limit and ZIP memory peaks.
+See [the 0.1.2 memory and launchd verification notes](docs/repair-0.1.2.zh-CN.md).
+The package requests a finite 192 MiB service budget, verifies both kernel limits,
+drains run-loop autorelease pools, and streams ZIP payloads with 64 KiB input/output
+buffers. Device validation is pending until the operator supplies kernel readback
+for the actual system-service PID; a plist value or SET success alone is insufficient.
+
 The 0.1.1 repair notes and device verification procedure are in
 [docs/repair-0.1.1.zh-CN.md](docs/repair-0.1.1.zh-CN.md).
 
@@ -50,7 +57,7 @@ rootless prefix `/var/jb`.
 On Windows, use **Actions → Build rootless deb → Run workflow** on a branch containing
 these changes. The macOS job runs the Objective-C regression harness, builds both
 architectures with an iOS 16.0 deployment target, checks the extracted package and signed
-daemon entitlements, then uploads **PosterForge-0.1.1-rootless** (the `.deb`, SHA256SUMS,
+daemon entitlements, then uploads **PosterForge-0.1.2-rootless** (the `.deb`, SHA256SUMS,
 and toolchain revisions). A separate diagnostics artifact includes the build log and
 per-slice entitlement dumps. Public APT publishing requires explicitly checking
 `publish_apt_repository`; ordinary builds and PRs only produce artifacts.

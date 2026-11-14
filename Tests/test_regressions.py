@@ -32,6 +32,8 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(launch["UserName"], "root")
         self.assertEqual(launch["ProgramArguments"], ["/var/jb/usr/libexec/posterforged"])
         self.assertEqual(launch["Umask"], 0o22)
+        self.assertEqual(launch["JetsamProperties"]["JetsamMemoryLimit"], 192)
+        self.assertEqual(launch["ProcessType"], "Background")
 
     def test_package_version_arch_and_script_line_endings(self):
         control = dict(line.split(": ", 1) for line in (ROOT / "control").read_text().splitlines())
@@ -52,7 +54,7 @@ class RuntimeTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
 
     def run_harness(self, *args):
-        run = subprocess.run([BIN, *map(str, args)], capture_output=True, text=True, check=False)
+        run = subprocess.run([BIN, *map(str, args)], capture_output=True, text=True, check=False, timeout=60)
         self.assertIn(run.returncode, (0, 1), f"Harness exited abnormally: {run.returncode}\n{run.stderr}")
         self.assertTrue(run.stdout.strip(), f"Harness returned no JSON: {run.stderr}")
         result = json.loads(run.stdout)
@@ -206,6 +208,56 @@ class RuntimeTests(unittest.TestCase):
         result = self.import_bytes(self.archive(files))
         self.assertTrue(result["success"])
         self.assertFalse(self.run_harness("randomize", result["value"][0], 54321)["success"])
+
+    def test_memory_budget_requires_actual_readback(self):
+        raised = self.run_harness("memory-mock", "low")["value"]
+        self.assertEqual((raised["activeMB"], raised["inactiveMB"]), (192, 192))
+        self.assertTrue(raised["verified"])
+        self.assertEqual(raised["setCalls"], 1)
+        ignored = self.run_harness("memory-mock", "ignored")["value"]
+        self.assertEqual(ignored["setErrno"], 0)
+        self.assertFalse(ignored["verified"], "SET success must not substitute for kernel readback")
+        denied = self.run_harness("memory-mock", "denied")["value"]
+        self.assertFalse(denied["verified"])
+        self.assertNotEqual(denied["setErrno"], 0)
+        missing = self.run_harness("memory-mock", "missing")["value"]
+        self.assertFalse(missing["verified"])
+        self.assertNotEqual(missing["readbackErrno"], 0)
+
+    def test_memory_budget_preserves_higher_existing_limits(self):
+        higher = self.run_harness("memory-mock", "higher")["value"]
+        self.assertTrue(higher["verified"])
+        self.assertEqual(higher["setCalls"], 0)
+        mixed = self.run_harness("memory-mock", "mixed")["value"]
+        self.assertEqual((mixed["activeMB"], mixed["inactiveMB"]), (256, 192))
+
+    def test_large_stored_and_deflated_entries_have_bounded_peak_memory(self):
+        for compression, size in ((zipfile.ZIP_STORED, 64 * 1024 * 1024),
+                                  (zipfile.ZIP_DEFLATED, 128 * 1024 * 1024)):
+            archive = self.root / (str(uuid.uuid4()) + ".tendies")
+            with zipfile.ZipFile(archive, "w", compression=compression) as bundle:
+                for name, data in self.descriptor().items():
+                    bundle.writestr(name, data)
+                with bundle.open("descriptors/Example/versions/1/contents/large.asset", "w") as output:
+                    chunk = b"x" * 65536
+                    for _ in range(size // len(chunk)):
+                        output.write(chunk)
+            result = self.run_harness("archive", archive, self.root / (str(uuid.uuid4()) + "-stage"))
+            self.assertTrue(result["success"], result)
+            extracted = Path(result["value"][0]) / "versions/1/contents/large.asset"
+            self.assertEqual(extracted.stat().st_size, size)
+            self.assertGreater(result["peakResidentBytes"], 0)
+            self.assertLess(result["peakResidentBytes"], 80 * 1024 * 1024, result)
+            print(f"streaming ZIP method={compression} expanded={size} peakRSS={result['peakResidentBytes']}")
+
+    def test_oversized_descriptor_metadata_is_rejected_before_loading(self):
+        files = self.descriptor()
+        files["descriptors/Example/versions/1/contents/Example.wallpaper/Wallpaper.plist"] = b"x" * (1024 * 1024 + 1)
+        result = self.import_bytes(self.archive(files))
+        self.assertTrue(result["success"])
+        failure = self.run_harness("randomize", result["value"][0], 54321)
+        self.assertFalse(failure["success"])
+        self.assertIn("exceeds 1 MiB", failure["error"])
 
 
 if __name__ == "__main__":

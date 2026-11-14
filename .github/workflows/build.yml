@@ -14,6 +14,7 @@ permissions:
 jobs:
   build:
     runs-on: macos-15
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Regression tests (real Objective-C scanner and ZIP importer)
@@ -47,7 +48,7 @@ jobs:
           test "${#debs[@]}" -eq 1
           deb="${debs[0]}"
           test "$(dpkg-deb -f "$deb" Architecture)" = iphoneos-arm64
-          test "$(dpkg-deb -f "$deb" Version)" = 0.1.1
+          test "$(dpkg-deb -f "$deb" Version)" = 0.1.2
           mkdir -p build/package
           dpkg-deb -x "$deb" build/package
           dpkg-deb -e "$deb" build/package-control
@@ -70,7 +71,7 @@ jobs:
           cp build/toolchain.txt packages/
       - uses: actions/upload-artifact@v4
         with:
-          name: PosterForge-0.1.1-rootless
+          name: PosterForge-0.1.2-rootless
           path: packages/
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
@@ -91,7 +92,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: PosterForge-0.1.1-rootless
+          name: PosterForge-0.1.2-rootless
           path: packages
       - name: Install APT packaging tools
         run: brew install dpkg

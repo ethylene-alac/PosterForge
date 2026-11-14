@@ -5,6 +5,11 @@
   <key>ProgramArguments</key><array><string>/var/jb/usr/libexec/posterforged</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>JetsamProperties</key><dict>
+    <key>JetsamMemoryLimit</key><integer>192</integer>
+  </dict>
   <key>UserName</key><string>root</string>
   <key>Umask</key><integer>18</integer>
   <key>StandardOutPath</key><string>/var/mobile/Library/Logs/PosterForge.log</string>

@@ -62,6 +62,12 @@ BOOL PFQueueRequest(NSDictionary *request, NSError **error) {
     return YES;
 }
 
+static void PFAppendDiagnostic(NSMutableArray<NSString *> *diagnostics, NSString *line) {
+    // Keep process identity plus a bounded tail; the full trace still goes to NSLog.
+    if(diagnostics.count>=256)[diagnostics removeObjectAtIndex:1];
+    [diagnostics addObject:line];
+}
+
 static void PFLogPath(NSString *path, NSMutableArray<NSString *> *diagnostics) {
     struct stat st;
     NSString *line;
@@ -79,7 +85,7 @@ static void PFLogPath(NSString *path, NSMutableArray<NSString *> *diagnostics) {
                 (unsigned)st.st_uid, (unsigned)st.st_gid, (unsigned)(st.st_mode & 07777),
                 (unsigned)(st.st_mode & S_IFMT), [checks componentsJoinedByString:@" "]];
     }
-    [diagnostics addObject:line];
+    PFAppendDiagnostic(diagnostics,line);
     NSLog(@"[PosterForge container] %@", line);
 }
 
@@ -96,7 +102,7 @@ NSString *PFFindPosterBoardContainer(NSString *base, NSError **error) {
     NSMutableArray<NSString *> *matches = [NSMutableArray array];
     NSError *firstReadError = nil;
     NSUInteger candidates = 0, readFailures = 0, invalidMetadata = 0;
-    for (NSString *uuid in [entries sortedArrayUsingSelector:@selector(compare:)]) {
+    for (NSString *uuid in [entries sortedArrayUsingSelector:@selector(compare:)]) @autoreleasepool {
         if (![[NSUUID alloc] initWithUUIDString:uuid]) {
             NSLog(@"[PosterForge container] skip non-UUID entry %@", uuid); continue;
         }
@@ -119,13 +125,13 @@ NSString *PFFindPosterBoardContainer(NSString *base, NSError **error) {
             readFailures++; if (!firstReadError) firstReadError = readError;
             PFLogPath(metadataPath, diagnostics);
             NSString *line = [NSString stringWithFormat:@"metadata read %@: %@", metadataPath, readError];
-            [diagnostics addObject:line]; NSLog(@"[PosterForge container] %@", line); continue;
+            PFAppendDiagnostic(diagnostics,line); NSLog(@"[PosterForge container] %@", line); continue;
         }
         id meta = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:&readError];
         if (![meta isKindOfClass:NSDictionary.class]) {
             invalidMetadata++; if (!firstReadError) firstReadError = readError;
             NSString *line = [NSString stringWithFormat:@"invalid metadata %@: %@", metadataPath, readError ?: @"expected dictionary"];
-            [diagnostics addObject:line]; NSLog(@"[PosterForge container] %@", line); continue;
+            PFAppendDiagnostic(diagnostics,line); NSLog(@"[PosterForge container] %@", line); continue;
         }
         id identifier = meta[@"MCMMetadataIdentifier"];
         NSLog(@"[PosterForge container] metadata %@ bytes=%lu MCMMetadataIdentifier=%@", metadataPath, (unsigned long)data.length, identifier);
@@ -134,7 +140,7 @@ NSString *PFFindPosterBoardContainer(NSString *base, NSError **error) {
     NSString *summary = [NSString stringWithFormat:@"entries=%lu UUID-candidates=%lu read-failures=%lu invalid-metadata=%lu matches=%lu",
                         (unsigned long)entries.count, (unsigned long)candidates, (unsigned long)readFailures,
                         (unsigned long)invalidMetadata, (unsigned long)matches.count];
-    [diagnostics addObject:summary]; NSLog(@"[PosterForge container] %@", summary);
+    PFAppendDiagnostic(diagnostics,summary); NSLog(@"[PosterForge container] %@", summary);
     if (matches.count == 1) { NSLog(@"[PosterForge container] selected %@", matches.firstObject); return matches.firstObject; }
     NSString *message = enumerationError ? @"Cannot enumerate app data containers; check daemon entitlements and sandbox access" :
         matches.count > 1 ? @"Multiple PosterBoard containers match metadata; refusing to choose one" :
