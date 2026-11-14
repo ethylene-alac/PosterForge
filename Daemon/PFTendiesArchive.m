@@ -95,7 +95,6 @@ static BOOL PFExtractEntry(NSDictionary *entry, int archive, NSString *staging, 
 }
 
 static BOOL PFExtractZIP(int archive, NSUInteger length, NSString *staging, NSError **error) {
-    NSFileManager *fm = NSFileManager.defaultManager;
     if (length < 22) return PFFail(error, @"Truncated Tendies ZIP");
     NSUInteger tailLength=MIN(length,(NSUInteger)65557), end=NSNotFound;
     NSMutableData *tail=[NSMutableData dataWithLength:tailLength];
