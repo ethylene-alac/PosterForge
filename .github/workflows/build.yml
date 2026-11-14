@@ -66,7 +66,7 @@ jobs:
             ldid -e "build/posterforged-$arch" > "build/entitlements-$arch.plist"
             python3 Tests/verify_entitlements.py "build/entitlements-$arch.plist"
           done
-          shasum -a 256 "$deb" > packages/SHA256SUMS
+          (cd packages && shasum -a 256 *.deb > SHA256SUMS)
           cp build/toolchain.txt packages/
       - uses: actions/upload-artifact@v4
         with:
