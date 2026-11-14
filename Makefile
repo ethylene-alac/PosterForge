@@ -18,7 +18,7 @@ include $(THEOS_MAKE_PATH)/aggregate.mk
 
 before-package::
 	chmod 0755 $(THEOS_PROJECT_DIR)/layout/DEBIAN/postinst $(THEOS_PROJECT_DIR)/layout/DEBIAN/prerm
-	install -m 0755 $(THEOS_PROJECT_DIR)/Tools/diagnose-service.sh $(THEOS_STAGING_DIR)$(THEOS_PACKAGE_INSTALL_PREFIX)/usr/libexec/posterforge-diagnose-service
+	install -m 0755 $(THEOS_PROJECT_DIR)/Tools/diagnose-service.sh $(THEOS_STAGING_DIR)/usr/libexec/posterforge-diagnose-service
 
 after-install::
 	install.exec "launchctl kickstart -k system/com.posterforge.daemon || true"
