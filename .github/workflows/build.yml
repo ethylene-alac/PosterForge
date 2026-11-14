@@ -55,7 +55,7 @@ jobs:
           daemon=build/package/var/jb/usr/libexec/posterforged
           prefs=build/package/var/jb/Library/PreferenceBundles/PosterForgePrefs.bundle/PosterForgePrefs
           for binary in "$daemon" "$prefs"; do
-            xcrun lipo -verify_arch arm64 arm64e "$binary"
+            xcrun lipo "$binary" -verify_arch arm64 arm64e
             for arch in arm64 arm64e; do
               xcrun lipo "$binary" -thin "$arch" -output "build/$(basename "$binary")-$arch"
               python3 Tests/verify_macho.py "build/$(basename "$binary")-$arch" "$arch"
